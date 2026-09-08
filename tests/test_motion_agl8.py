@@ -91,9 +91,119 @@ def test_aqara_fp300_battery_from_e1_tlv(zigpy_device_from_v2_quirk):
 
     assert len(power_listener.attribute_updates) == 2
     assert power_listener.attribute_updates[0][0] == zcl_power_voltage_id
-    assert power_listener.attribute_updates[0][1] == pytest.approx(0.306)
+    assert power_listener.attribute_updates[0][1] == pytest.approx(30.6)
     assert power_listener.attribute_updates[1][0] == zcl_power_percent_id
-    assert power_listener.attribute_updates[1][1] == 0
+    assert power_listener.attribute_updates[1][1] == 200
+
+
+@pytest.mark.parametrize(
+    "tlv_voltage, expected_voltage, expected_percent",
+    (
+        (306, 30.6, 200),
+        (320, 32.0, 200),
+        (2950, 29.5, 150),
+        (2750, 27.5, 0),
+    ),
+)
+def test_aqara_fp300_battery_tlv_scaling(
+    zigpy_device_from_v2_quirk, tlv_voltage, expected_voltage, expected_percent
+):
+    """Test TLV voltage scaling in units of 10 mV and mV plausibility window."""
+    device = zigpy_device_from_v2_quirk(AQARA, "lumi.sensor_occupy.agl8")
+
+    manu_cluster = device.endpoints[1].in_clusters[AqaraFP300ManuCluster.cluster_id]
+    power_cluster = device.endpoints[1].power
+    power_listener = ClusterListener(power_cluster)
+
+    manu_cluster.update_attribute(
+        XIAOMI_AQARA_ATTRIBUTE_E1,
+        create_aqara_attr_report({23: tlv_voltage}),
+    )
+
+    assert len(power_listener.attribute_updates) == 2
+    assert power_listener.attribute_updates[0][1] == pytest.approx(expected_voltage)
+    assert power_listener.attribute_updates[1][1] == expected_percent
+
+
+def test_aqara_fp300_drops_device_battery_reports(zigpy_device_from_v2_quirk):
+    """Test that standard power cluster battery reports do not override TLV values."""
+    device = zigpy_device_from_v2_quirk(AQARA, "lumi.sensor_occupy.agl8")
+
+    manu_cluster = device.endpoints[1].in_clusters[AqaraFP300ManuCluster.cluster_id]
+    power_cluster = device.endpoints[1].power
+    power_listener = ClusterListener(power_cluster)
+
+    zcl_power_voltage_id = PowerConfiguration.AttributeDefs.battery_voltage.id
+    zcl_power_percent_id = (
+        PowerConfiguration.AttributeDefs.battery_percentage_remaining.id
+    )
+
+    manu_cluster.update_attribute(
+        XIAOMI_AQARA_ATTRIBUTE_E1,
+        create_aqara_attr_report({23: 320}),
+    )
+    assert len(power_listener.attribute_updates) == 2
+
+    power_cluster.update_attribute(zcl_power_voltage_id, 3)
+    power_cluster.update_attribute(zcl_power_percent_id, 200)
+
+    assert len(power_listener.attribute_updates) == 2
+    assert power_listener.attribute_updates[0][1] == pytest.approx(32.0)
+    assert power_listener.attribute_updates[1][1] == 200
+
+
+@pytest.mark.parametrize("tlv_voltage", (0, 50, 100, 4500))
+def test_aqara_fp300_battery_tlv_out_of_window(zigpy_device_from_v2_quirk, tlv_voltage):
+    """Test that implausible TLV voltages leave the cache untouched."""
+    device = zigpy_device_from_v2_quirk(AQARA, "lumi.sensor_occupy.agl8")
+
+    manu_cluster = device.endpoints[1].in_clusters[AqaraFP300ManuCluster.cluster_id]
+    power_cluster = device.endpoints[1].power
+    power_listener = ClusterListener(power_cluster)
+
+    manu_cluster.update_attribute(
+        XIAOMI_AQARA_ATTRIBUTE_E1,
+        create_aqara_attr_report({23: tlv_voltage}),
+    )
+
+    assert len(power_listener.attribute_updates) == 0
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        pytest.param(b"", id="empty-payload"),
+        pytest.param(b"\x00", id="stray-null-byte"),
+        pytest.param(create_aqara_attr_report({99: 1234}), id="unknown-tag-only"),
+    ),
+)
+def test_aqara_fp300_battery_tlv_without_voltage_tag_is_noop(
+    zigpy_device_from_v2_quirk, payload
+):
+    """Test that a lifeline payload without a voltage tag keeps the cached battery.
+
+    The FP300 intermittently reports lifelines that parse to an empty dict or
+    contain no voltage tag. These must not clobber the last good reading.
+    """
+    device = zigpy_device_from_v2_quirk(AQARA, "lumi.sensor_occupy.agl8")
+
+    manu_cluster = device.endpoints[1].in_clusters[AqaraFP300ManuCluster.cluster_id]
+    power_cluster = device.endpoints[1].power
+    power_listener = ClusterListener(power_cluster)
+
+    zcl_power_voltage_id = PowerConfiguration.AttributeDefs.battery_voltage.id
+
+    manu_cluster.update_attribute(
+        XIAOMI_AQARA_ATTRIBUTE_E1,
+        create_aqara_attr_report({23: 306}),
+    )
+    assert len(power_listener.attribute_updates) == 2
+    power_listener.attribute_updates.clear()
+
+    manu_cluster.update_attribute(XIAOMI_AQARA_ATTRIBUTE_E1, payload)
+
+    assert power_listener.attribute_updates == []
+    assert power_cluster.get(zcl_power_voltage_id) == pytest.approx(30.6)
 
 
 @pytest.mark.parametrize(
